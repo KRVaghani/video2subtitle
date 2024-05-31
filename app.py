@@ -8,6 +8,7 @@ import gradio as gr
 from decode import decode
 from model import get_pretrained_model, get_vad, language_to_models, get_punct_model
 import subprocess
+from translate import Translator
 
 title = "video to text"
 
@@ -125,23 +126,30 @@ def cleanup_uploads_folder(folder_path):
     """Deletes all files in the specified folder."""
     folder = Path(folder_path)
     for file_path in folder.iterdir():
-        if file_path.is_file():  
+        if file_path.is_file():  # ensure only files are deleted, not directories
             file_path.unlink()
 
 def combine_subtitles_with_video(video_file: str, subtitle_file: str):
     logging.info(f"Combining subtitles from {subtitle_file} with video {video_file}")
 
+    # Define the output video file name with subtitles included
     combined_video_filename = Path("uploads/output_video.mp4")
     
+    # Command is written as a single string
     command = 'ffmpeg -i "uploads/uploaded_video.mp4" -vf "subtitles=uploads/uploaded_subtitles.srt" "uploads/output_video.mp4"'
 
     try:
+        # Execute the FFmpeg command using subprocess
         subprocess.run(command, check=True, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         logging.info("Subtitles combined with video successfully!")
+        # Cleanup: Delete all files in uploads folder
+        #cleanup_uploads_folder("uploads")
         html_output = build_html_output("Subtitles combined with video successfully!", "result_item_success")
         return str(combined_video_filename), html_output, str(combined_video_filename)
     except subprocess.CalledProcessError as e:
         logging.error(f"FFmpeg error: {e.stderr}")
+        # Cleanup even if error occurs
+        #cleanup_uploads_folder("uploads")
         html_output = build_html_output(f"Failed to combine subtitles with video. FFmpeg error: {e.stderr}", "result_item_error")
         return "", html_output, ""
 
@@ -149,6 +157,36 @@ def save_uploaded_file(file, filename):
     file_path = upload_dir / filename
     shutil.move(file.name, file_path)
     return file_path
+
+def translate_srt_file(srt_content, target_language):
+    translator = Translator(to_lang=target_language)
+    translated_srt = []
+    
+    for line in srt_content.split('\n'):
+        if '-->' in line or line.strip().isdigit() or line == '':
+            translated_srt.append(line)
+        else:
+            translated_srt.append(translator.translate(line))
+    
+    return '\n'.join(translated_srt)
+
+def process_srt_file(srt_file, target_language):
+    try:
+        srt_path = save_uploaded_file(srt_file, "uploaded_subtitles.srt")
+        with open(srt_path, "r", encoding="utf-8") as file:
+            srt_content = file.read()
+        
+        translated_srt_content = translate_srt_file(srt_content, target_language)
+        translated_srt_path = srt_path.with_name(f"translated_{target_language}.srt")
+        with open(translated_srt_path, "w", encoding="utf-8") as file:
+            file.write(translated_srt_content)
+        
+        return str(translated_srt_path), build_html_output("SRT file translated successfully!", "result_item_success")
+    except Exception as e:
+        logging.error(f"Error processing SRT file: {e}")
+        return "", build_html_output(f"Failed to process SRT file. Error: {e}", "result_item_error")
+    
+language_codes = ["en", "es", "fr", "de", "zh", "it", "ja", "ko", "pt", "ru"]
 
 demo = gr.Blocks(css=css)
 
@@ -229,6 +267,27 @@ with demo:
             output_combined_video = gr.Video(label="Combined video with subtitles", show_label=True)
             output_info_combined_video = gr.HTML(label="Info for combined video")
 
+        with gr.TabItem("Upload srt file"):
+            file_input_srt = gr.File(label="Upload SRT file", file_types=["srt"])
+            language_dropdown = gr.Dropdown(
+                label="Select target language",
+                choices=language_codes,  # Use only language codes
+                value="en"
+            )
+            process_srt_file_button = gr.Button("Process file")
+            
+            output_srt_file = gr.File(label="Translated SRT file", show_label=True)
+            output_info_srt = gr.HTML(label="Info for translated SRT file")
+
+            def process_srt_file_with_code(srt_file, target_language):
+                return process_srt_file(srt_file, target_language)
+
+            process_srt_file_button.click(
+                process_srt_file_with_code,
+                inputs=[file_input_srt, language_dropdown],
+                outputs=[output_srt_file, output_info_srt],
+            )
+
         upload_video_button.click(
             process_uploaded_video_file,
             inputs=[
@@ -268,15 +327,16 @@ with demo:
             video_path = save_uploaded_file(file1, "uploaded_video.mp4")
             subtitle_text_path = save_uploaded_file(file2, "uploaded_subtitles.txt")
 
+            # Change the extension from .txt to .srt
             subtitle_srt_path = subtitle_text_path.with_suffix(".srt")
             subtitle_text_path.rename(subtitle_srt_path)
 
             combined_video_filename, html_output, combined_output = combine_subtitles_with_video(video_path, subtitle_srt_path)
 
             return (
-                combined_video_filename,
+                str(combined_video_filename),
                 html_output,
-                combined_output,
+                str(combined_output),
             )
         
         process_files_button.click(
